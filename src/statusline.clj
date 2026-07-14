@@ -24,7 +24,9 @@
 (def ^:private ansi-red "[38;2;255;0;0m")
 (def ^:private ansi-blue "[94m")
 (def ^:private ansi-cyan "[96m")
+(def ^:private ansi-bright-yellow "[93m")
 (def ^:private ansi-empty-fg "[38;5;237m")
+(def ^:private ansi-empty-bg "[48;5;237m")
 
 (defn supports-color?
   "True when the terminal supports ANSI colors (NO_COLOR env var unset)."
@@ -42,28 +44,36 @@
 
 (defn ctx-fill-color
   "Threshold color for the context-window usage bar, by absolute token count:
-   ≥300k red, ≥150k orange, otherwise nil."
+   ≥200k red, ≥100k orange, otherwise nil."
   [tokens]
   (cond
-    (>= tokens 300000) ansi-red
-    (>= tokens 150000) ansi-orange
+    (>= tokens 200000) ansi-red
+    (>= tokens 100000) ansi-orange
     :else nil))
 
 (defn percent-bar
   "Render an 8-cell horizontal bar for `pct` (0-100). When `color?`, every
    cell is a full block (filled cells in `fill-color` or default fg, empty
    cells in dim gray) producing a continuous gap-free bar at 8-level
-   resolution. Without color, falls back to plain block-eighths."
-  ([pct] (percent-bar pct false nil))
-  ([pct color? fill-color]
+   resolution. Without color, falls back to plain block-eighths. When
+   `label` is supplied (color mode only), the label text is inserted
+   immediately after the filled cells, in `fill-color`; empty cells follow."
+  ([pct] (percent-bar pct false nil nil))
+  ([pct color? fill-color] (percent-bar pct color? fill-color nil))
+  ([pct color? fill-color label]
    (let [pct (-> pct double (max 0.0) (min 100.0))]
      (if color?
        (let [full-cells (long (Math/round (* (/ pct 100.0) 8.0)))
-             empty-cells (- 8 full-cells)
+             label-len (count (or label ""))
+             empty-cells (max 0 (- 8 full-cells label-len))
              fill (or fill-color "")
              full-cell (str fill full-block ansi-reset)
-             empty-cell (str ansi-empty-fg full-block ansi-reset)]
+             empty-cell (str ansi-empty-fg full-block ansi-reset)
+             label-rendered (if (zero? label-len)
+                              ""
+                              (str fill ansi-empty-bg label ansi-reset))]
          (str (apply str (repeat full-cells full-cell))
+              label-rendered
               (apply str (repeat empty-cells empty-cell))))
        (let [filled (long (Math/round (* (/ pct 100.0) 64.0)))
              full-cells (quot filled 8)
@@ -112,6 +122,19 @@
           h12 (let [m (mod h24 12)] (if (zero? m) 12 m))]
       (format "%d:%02d" h12 (.getMinute local-time)))))
 
+(defn format-context-size
+  "Render a context-window size as a terse label: 1000000 -> '1M',
+   200000 -> '200K', 1500000 -> '1.5M'. Returns nil when size is nil."
+  [size]
+  (when size
+    (let [size (long size)]
+      (cond
+        (>= size 1000000) (let [m (/ size 1000000.0)
+                                s (format "%.1f" m)]
+                            (str (str/replace s #"\.0$" "") "M"))
+        (>= size 1000) (str (long (/ size 1000)) "k")
+        :else (str size)))))
+
 (defn format-percent-segment
   "Render a labelled bar segment like 'ct ████████'. Returns nil when
    pct is nil so the caller can omit the segment. When `color?`, the bar
@@ -136,14 +159,17 @@
           color? (supports-color?)
           ctx-color (when (and color? ctx-tokens) (ctx-fill-color ctx-tokens))
           rate-color (when (and color? rate-pct) (rate-fill-color rate-pct))
+          ctx-size-label (format-context-size ctx-size)
           rate-segment (when rate-pct
-                         (cond-> (format-percent-segment "5h" rate-pct color? rate-color)
+                         (cond-> (format-percent-segment ctx-size-label rate-pct color? rate-color)
                            rate-reset (str " " rate-reset)))
           effort-tag (format-effort data color?)
+          ctx-label (when ctx-tokens (format-context-size ctx-tokens))
+          ctx-segment (when ctx-pct (percent-bar ctx-pct color? ctx-color ctx-label))
           parts (cond-> [model-name]
-                  ctx-pct (conj (format-percent-segment "ct" ctx-pct color? ctx-color))
-                  rate-segment (conj rate-segment)
-                  effort-tag (conj effort-tag))]
+                  effort-tag (conj effort-tag)
+                  ctx-segment (conj ctx-segment)
+                  rate-segment (conj rate-segment))]
       (println (str/join " " parts)))
     (catch Exception e
       (let [error-msg (or (.getMessage e) "Unknown error")]
